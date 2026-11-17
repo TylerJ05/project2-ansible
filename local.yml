@@ -1,0 +1,159 @@
+---
+- name: Project 2 hardening
+  hosts: localhost
+  connection: local
+  become: true
+
+  tasks:
+    # ===== System / SSH =====
+
+    - name: SSH - no root login, no password login
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/99-course.conf
+        content: |
+          PermitRootLogin no
+          PasswordAuthentication no
+        mode: "0644"
+      notify: Restart ssh
+
+    - name: Firewall - allow SSH
+      community.general.ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+
+    - name: Firewall - deny all other incoming
+      community.general.ufw:
+        direction: incoming
+        policy: deny
+
+    - name: Firewall - turn on
+      community.general.ufw:
+        state: enabled
+
+    - name: Remove the bad cron job
+      ansible.builtin.file:
+        path: /etc/cron.d/sysstat-collect
+        state: absent
+
+    - name: Stop and disable the ftp service
+      ansible.builtin.service:
+        name: ftp
+        state: stopped
+        enabled: false
+
+    - name: Install fail2ban
+      ansible.builtin.apt:
+        name: fail2ban
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Turn on fail2ban for SSH
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [sshd]
+          enabled = true
+        mode: "0644"
+      notify: Restart fail2ban
+
+    - name: Start fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: started
+        enabled: true
+
+    - name: Fix the uploads folder
+      ansible.builtin.file:
+        path: /srv/app/uploads
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
+    # ===== Users =====
+
+    - name: Remove the monitor account
+      ansible.builtin.user:
+        name: monitor
+        state: absent
+
+    - name: Give ubuntu a password
+      ansible.builtin.user:
+        name: ubuntu
+        password: "$6$lTWbDWU4nOCVfciB$xab8Q469OWTxslSyiCTAO6J8S9dhvK9DOKrF8467Nd2OijIOlblj/Wo2p9wybrmiJCmIEWf/TPJlXcSt6OMdP0"
+    - name: Delete the NOPASSWD rule file
+      ansible.builtin.file:
+        path: /etc/sudoers.d/90-course-nopasswd
+        state: absent
+
+    - name: Remove NOPASSWD from the cloud-init rule
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers.d/90-cloud-init-users
+        regexp: '^ubuntu\s'
+        line: "ubuntu ALL=(ALL) ALL"
+        validate: "visudo -cf %s"
+
+    - name: Remove the SUID bit from diagtool
+      ansible.builtin.file:
+        path: /usr/local/bin/diagtool
+        mode: "0755"
+
+    - name: Lock the kioskuser account
+      ansible.builtin.user:
+        name: kioskuser
+        password_lock: true
+
+    - name: Protect config.yml
+      ansible.builtin.file:
+        path: /opt/app/config.yml
+        owner: root
+        group: root
+        mode: "0600"
+
+    # ===== Database =====
+
+    - name: Install the MySQL driver for Ansible
+      ansible.builtin.apt:
+        name: python3-pymysql
+        state: present
+
+    - name: webapp - only SELECT/INSERT/UPDATE/DELETE on shopdb
+      community.mysql.mysql_user:
+        name: webapp
+        host: "%"
+        priv: "shopdb.*:SELECT,INSERT,UPDATE,DELETE"
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+    - name: reporting - only SELECT on shopdb
+      community.mysql.mysql_user:
+        name: reporting
+        host: "%"
+        priv: "shopdb.*:SELECT"
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+    - name: Remove remote root
+      community.mysql.mysql_user:
+        name: root
+        host: "%"
+        state: absent
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+    - name: Remove the anonymous account
+      community.mysql.mysql_user:
+        name: ""
+        host: localhost
+        state: absent
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+  handlers:
+    - name: Restart ssh
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+
+    - name: Restart fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: restarted
